@@ -6,7 +6,7 @@ use crate::{
     client::{config::ClientConfig, poller::spawn_linear_poller, service::LinearService},
     config::{LlimConfig, default_db_path, load_config, resolve_api_key},
     dispatcher::Dispatcher,
-    domain::{HydrationState, Issue},
+    domain::{CURRENT_CACHE_SCHEMA_VERSION, HydrationState, Issue},
     event::LlimEvent,
     llim_app::LlimApp,
     notification_buffer::spawn_notification_buffer_timer,
@@ -30,7 +30,9 @@ pub fn initialize_app(
     let mut store = LinearStore::new(default_db_path());
     store.init_duckdb_and_load(&config.database, Some(&sender));
 
-    let has_cached = !store.issues.is_empty() && store.sync_meta.issue_watermark.is_some();
+    let has_cached = !store.issues.is_empty()
+        && store.sync_meta.issue_watermark.is_some()
+        && store.sync_meta.cache_schema_version >= CURRENT_CACHE_SCHEMA_VERSION;
     let initial_watermark = if has_cached {
         store.hydration_state = HydrationState::CatchUpDelta;
         store.sync_meta.issue_watermark

@@ -209,6 +209,29 @@ impl StatefulWidget for AttentionTableWidget<'_> {
                 .collect::<Vec<_>>()
                 .join(", ");
 
+            let id_cell = if issue.is_epic() {
+                Cell::from(Line::from(vec![
+                    Span::styled("◆ ", theme().epic_badge),
+                    Span::styled(issue.identifier.as_str(), theme().epic_id),
+                ]))
+            } else {
+                Cell::from(Span::styled(issue.identifier.as_str(), theme().issue_id))
+            };
+
+            let mut title_spans = Vec::with_capacity(3);
+            if let Some(epic_badge) = issue.epic_badge_label() {
+                title_spans.push(Span::styled(format!("[{epic_badge}] "), theme().epic_badge));
+                title_spans.push(Span::styled(issue.clean_title(), theme().epic_title));
+            } else if let Some(parent_ident) = &issue.parent_identifier {
+                title_spans.push(Span::styled(
+                    format!("↳ {parent_ident} "),
+                    theme().sub_issue_badge,
+                ));
+                title_spans.push(Span::styled(issue.title.as_str(), theme().issue_title));
+            } else {
+                title_spans.push(Span::styled(issue.title.as_str(), theme().issue_title));
+            }
+
             let mut row_cells = Vec::with_capacity(9);
             if has_sel {
                 if is_checked {
@@ -218,7 +241,7 @@ impl StatefulWidget for AttentionTableWidget<'_> {
                 }
             }
             row_cells.extend([
-                Cell::from(Span::styled(issue.identifier.as_str(), theme().issue_id)),
+                id_cell,
                 Cell::from(Span::styled(issue.team_key.as_str(), theme().team_badge)),
                 Cell::from(Span::styled(proj, theme().project_name)),
                 Cell::from(Span::styled(
@@ -233,7 +256,7 @@ impl StatefulWidget for AttentionTableWidget<'_> {
                     issue.priority.short_label(),
                     theme().priority_style(issue.priority),
                 )),
-                Cell::from(Span::styled(issue.title.as_str(), theme().issue_title)),
+                Cell::from(Line::from(title_spans)),
                 Cell::from(Span::styled(
                     format_relative_time(issue.updated_at).to_string(),
                     theme().date,
@@ -248,7 +271,7 @@ impl StatefulWidget for AttentionTableWidget<'_> {
             widths.push(Constraint::Length(4));
         }
         widths.extend([
-            Constraint::Length(10),
+            Constraint::Length(11),
             Constraint::Length(8),
             Constraint::Length(18),
             Constraint::Length(22),

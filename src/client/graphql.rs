@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::{
     domain::{
-        Comment, Issue, IssueHistoryEntry, IssueLabel, IssuePriority, Project, StateCategory, Team,
-        User, WorkflowState,
+        Comment, Issue, IssueHistoryEntry, IssueLabel, IssuePriority, Project,
+        RelatedIssueSummary, StateCategory, SubIssueSummary, Team, User, WorkflowState,
     },
     event::IssueActivityPayload,
     id::{CommentId, HistoryId, IssueId, LabelId, ProjectId, StateId, TeamId, UserId},
@@ -107,12 +107,30 @@ query BootstrapIssues(
       state { id name type color }
       assignee { id name displayName }
       creator { id name displayName }
+      parent { id identifier title }
+      children(first: 25) {
+        nodes {
+          id
+          identifier
+          title
+          priority
+          state { name type color }
+          assignee { id name displayName }
+        }
+      }
       labels(first: 10) { nodes { id name } }
+      relations(first: 5) {
+        nodes {
+          id
+          type
+          relatedIssue { id identifier title state { name type color } }
+        }
+      }
       inverseRelations(first: 5) {
         nodes {
           id
           type
-          issue { id identifier state { type } }
+          issue { id identifier title state { name type color } }
         }
       }
     }
@@ -158,12 +176,30 @@ query CompositeDelta(
       state { id name type color }
       assignee { id name displayName }
       creator { id name displayName }
+      parent { id identifier title }
+      children(first: 25) {
+        nodes {
+          id
+          identifier
+          title
+          priority
+          state { name type color }
+          assignee { id name displayName }
+        }
+      }
       labels(first: 10) { nodes { id name } }
+      relations(first: 5) {
+        nodes {
+          id
+          type
+          relatedIssue { id identifier title state { name type color } }
+        }
+      }
       inverseRelations(first: 5) {
         nodes {
           id
           type
-          issue { id identifier state { type } }
+          issue { id identifier title state { name type color } }
         }
       }
     }
@@ -196,6 +232,8 @@ query IssueActivityBatch($issueIds: [ID!]!) {
           id
           createdAt
           updatedDescription
+          fromTitle
+          toTitle
           actor { id name displayName }
           botActor { name }
           fromState { id name }
@@ -206,6 +244,8 @@ query IssueActivityBatch($issueIds: [ID!]!) {
           toPriority
           fromProject { id name }
           toProject { id name }
+          fromParent { id identifier title }
+          toParent { id identifier title }
           addedLabels { id name }
           removedLabels { id name }
         }
@@ -279,12 +319,30 @@ mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
       state { id name type color }
       assignee { id name displayName }
       creator { id name displayName }
+      parent { id identifier title }
+      children(first: 25) {
+        nodes {
+          id
+          identifier
+          title
+          priority
+          state { name type color }
+          assignee { id name displayName }
+        }
+      }
       labels(first: 10) { nodes { id name } }
+      relations(first: 5) {
+        nodes {
+          id
+          type
+          relatedIssue { id identifier title state { name type color } }
+        }
+      }
       inverseRelations(first: 5) {
         nodes {
           id
           type
-          issue { id identifier state { type } }
+          issue { id identifier title state { name type color } }
         }
       }
     }
@@ -314,12 +372,30 @@ mutation IssueCreate($input: IssueCreateInput!) {
       state { id name type color }
       assignee { id name displayName }
       creator { id name displayName }
+      parent { id identifier title }
+      children(first: 25) {
+        nodes {
+          id
+          identifier
+          title
+          priority
+          state { name type color }
+          assignee { id name displayName }
+        }
+      }
       labels(first: 10) { nodes { id name } }
+      relations(first: 5) {
+        nodes {
+          id
+          type
+          relatedIssue { id identifier title state { name type color } }
+        }
+      }
       inverseRelations(first: 5) {
         nodes {
           id
           type
-          issue { id identifier state { type } }
+          issue { id identifier title state { name type color } }
         }
       }
     }
@@ -593,7 +669,9 @@ pub struct ProjectRefDto {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserNodeDto {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub name: String,
     #[serde(rename = "displayName")]
     pub display_name: Option<String>,
@@ -612,23 +690,65 @@ pub struct LabelNodeDto {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RelatedIssueStateDto {
-    #[serde(rename = "type")]
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(rename = "type", default)]
     pub state_type: String,
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RelatedIssueRefDto {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub identifier: String,
+    #[serde(default)]
+    pub title: Option<String>,
     pub state: Option<RelatedIssueStateDto>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct InverseRelationNodeDto {
+pub struct RelationNodeDto {
+    #[serde(default)]
     pub id: String,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
+    pub rel_type: String,
+    #[serde(rename = "relatedIssue")]
+    pub related_issue: Option<RelatedIssueRefDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InverseRelationNodeDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(rename = "type", default)]
     pub rel_type: String,
     pub issue: Option<RelatedIssueRefDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ParentIssueRefDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub identifier: String,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChildIssueNodeDto {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub identifier: String,
+    #[serde(default)]
+    pub title: String,
+    pub priority: Option<i32>,
+    pub state: Option<RelatedIssueStateDto>,
+    pub assignee: Option<UserNodeDto>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -656,7 +776,13 @@ pub struct IssueNodeDto {
     pub state: StateNodeDto,
     pub assignee: Option<UserNodeDto>,
     pub creator: Option<UserNodeDto>,
+    #[serde(default)]
+    pub parent: Option<ParentIssueRefDto>,
+    #[serde(default)]
+    pub children: Option<Connection<ChildIssueNodeDto>>,
     pub labels: Option<Connection<LabelNodeDto>>,
+    #[serde(default)]
+    pub relations: Option<Connection<RelationNodeDto>>,
     #[serde(rename = "inverseRelations")]
     pub inverse_relations: Option<Connection<InverseRelationNodeDto>>,
 }
@@ -664,21 +790,110 @@ pub struct IssueNodeDto {
 impl IssueNodeDto {
     pub fn into_domain(self) -> Issue {
         let mut blocked_by = Vec::new();
+        let mut related_issues = Vec::new();
+
+        if let Some(rel_conn) = self.relations {
+            for r in rel_conn.nodes {
+                if let Some(target) = r.related_issue {
+                    let (state_name, state_color, state_category) = match target.state {
+                        Some(s) => (
+                            s.name.unwrap_or_else(|| s.state_type.clone()).into(),
+                            s.color.unwrap_or_else(|| "#808080".to_string()).into(),
+                            StateCategory::from_linear_type(&s.state_type),
+                        ),
+                        None => ("Unknown".into(), "#808080".into(), StateCategory::Unstarted),
+                    };
+                    related_issues.push(RelatedIssueSummary {
+                        id: IssueId::new(target.id),
+                        identifier: target.identifier.into(),
+                        title: target.title.unwrap_or_default().into(),
+                        relation_type: r.rel_type.into(),
+                        state_name,
+                        state_color,
+                        state_category,
+                    });
+                }
+            }
+        }
+
         if let Some(inv_conn) = self.inverse_relations {
             for r in inv_conn.nodes {
-                if r.rel_type == "blocks" {
-                    if let Some(source) = r.issue {
-                        let cat = source
-                            .state
-                            .map(|s| StateCategory::from_linear_type(&s.state_type))
-                            .unwrap_or(StateCategory::Unstarted);
-                        if cat.is_active() {
-                            blocked_by.push(source.identifier.into());
-                        }
+                if let Some(source) = r.issue {
+                    let (state_name, state_color, cat) = match source.state {
+                        Some(s) => (
+                            s.name.unwrap_or_else(|| s.state_type.clone()).into(),
+                            s.color.unwrap_or_else(|| "#808080".to_string()).into(),
+                            StateCategory::from_linear_type(&s.state_type),
+                        ),
+                        None => ("Unknown".into(), "#808080".into(), StateCategory::Unstarted),
+                    };
+                    if r.rel_type == "blocks" && cat.is_active() {
+                        blocked_by.push(source.identifier.clone().into());
+                    }
+                    let inv_label = if r.rel_type == "blocks" {
+                        "blocked_by"
+                    } else {
+                        r.rel_type.as_str()
+                    };
+                    if !related_issues
+                        .iter()
+                        .any(|existing| existing.identifier.as_str() == source.identifier.as_str())
+                    {
+                        related_issues.push(RelatedIssueSummary {
+                            id: IssueId::new(source.id),
+                            identifier: source.identifier.into(),
+                            title: source.title.unwrap_or_default().into(),
+                            relation_type: inv_label.into(),
+                            state_name,
+                            state_color,
+                            state_category: cat,
+                        });
                     }
                 }
             }
         }
+
+        let (parent_id, parent_identifier, parent_title) = match self.parent {
+            Some(p) => (
+                Some(IssueId::new(p.id)),
+                Some(p.identifier.into()),
+                p.title.map(Into::into),
+            ),
+            None => (None, None, None),
+        };
+
+        let mut sub_issues = Vec::new();
+        if let Some(child_conn) = self.children {
+            for c in child_conn.nodes {
+                let (state_name, state_color, state_category) = match c.state {
+                    Some(s) => (
+                        s.name.unwrap_or_else(|| s.state_type.clone()).into(),
+                        s.color.unwrap_or_else(|| "#808080".to_string()).into(),
+                        StateCategory::from_linear_type(&s.state_type),
+                    ),
+                    None => ("Todo".into(), "#808080".into(), StateCategory::Unstarted),
+                };
+                let assignee_name = c
+                    .assignee
+                    .map(|a| a.display_name.unwrap_or(a.name).into());
+                sub_issues.push(SubIssueSummary {
+                    id: IssueId::new(c.id),
+                    identifier: c.identifier.into(),
+                    title: c.title.into(),
+                    state_name,
+                    state_color,
+                    state_category,
+                    priority: IssuePriority::from_linear_int(c.priority.unwrap_or(0)),
+                    assignee_name,
+                });
+            }
+        }
+        sub_issues.sort_by(|a, b| {
+            a.state_category
+                .cmp(&b.state_category)
+                .then_with(|| a.priority.cmp(&b.priority))
+                .then_with(|| a.identifier.cmp(&b.identifier))
+        });
 
         let mut labels = Vec::new();
         let mut label_ids = Vec::new();
@@ -738,6 +953,11 @@ impl IssueNodeDto {
             labels,
             label_ids,
             blocked_by,
+            parent_id,
+            parent_identifier,
+            parent_title,
+            sub_issues,
+            related_issues,
             has_unacknowledged_mention: false,
             git_branch_name: self.branch_name.map(Into::into),
             url: self.url.into(),
@@ -796,6 +1016,10 @@ pub struct HistoryNodeDto {
     pub created_at: DateTime<Utc>,
     #[serde(rename = "updatedDescription", default)]
     pub updated_description: Option<bool>,
+    #[serde(rename = "fromTitle", default)]
+    pub from_title: Option<String>,
+    #[serde(rename = "toTitle", default)]
+    pub to_title: Option<String>,
     pub actor: Option<UserNodeDto>,
     #[serde(rename = "botActor")]
     pub bot_actor: Option<BotActorDto>,
@@ -815,6 +1039,10 @@ pub struct HistoryNodeDto {
     pub from_project: Option<HistoryProjectRefDto>,
     #[serde(rename = "toProject")]
     pub to_project: Option<HistoryProjectRefDto>,
+    #[serde(rename = "fromParent", default)]
+    pub from_parent: Option<ParentIssueRefDto>,
+    #[serde(rename = "toParent", default)]
+    pub to_parent: Option<ParentIssueRefDto>,
     #[serde(rename = "addedLabels", default)]
     pub added_labels: Option<Vec<LabelNodeDto>>,
     #[serde(rename = "removedLabels", default)]
@@ -887,6 +1115,10 @@ impl IssueActivityNodeDto {
                         .map(|u| u.display_name.unwrap_or(u.name).into()),
                     from_project: h.from_project.map(|p| p.name.unwrap_or(p.id).into()),
                     to_project: h.to_project.map(|p| p.name.unwrap_or(p.id).into()),
+                    from_title: h.from_title.map(Into::into),
+                    to_title: h.to_title.map(Into::into),
+                    from_parent: h.from_parent.map(|p| p.identifier.into()),
+                    to_parent: h.to_parent.map(|p| p.identifier.into()),
                     added_labels,
                     removed_labels,
                     updated_description: h.updated_description.unwrap_or(false),

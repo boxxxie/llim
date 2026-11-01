@@ -122,6 +122,8 @@ pub enum LlimEvent {
     ProjectDetailsClose,
     IssueDetailsOpen(IssueId),
     IssueDetailsClose,
+    IssueDetailsNext,
+    IssueDetailsPrev,
     ActivityDetailsOpen(ActivityId),
     ActivityDetailsClose,
     CopySelectedIssueKey,

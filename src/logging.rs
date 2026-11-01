@@ -1,5 +1,11 @@
-use std::{path::PathBuf, sync::mpsc::Sender};
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    sync::mpsc::Sender,
+};
 
+use chrono::Utc;
 use compact_str::CompactString;
 use directories::ProjectDirs;
 use tracing::{Level, Metadata};
@@ -165,9 +171,16 @@ pub fn init_logging(
         let (non_blocking, file_guard) = tracing_appender::non_blocking(file_appender);
         guard = Some(file_guard);
 
-        let file_filter = EnvFilter::builder()
-            .with_default_directive(config.file_level.into())
-            .from_env_lossy();
+        let default_directives = if config.file_level == Level::TRACE {
+            "trace,hyper_util=debug,reqwest=debug,h2=info,rustls=info".to_string()
+        } else {
+            format!(
+                "{},hyper_util=warn,reqwest=warn,h2=warn,rustls=warn",
+                config.file_level.as_str().to_ascii_lowercase()
+            )
+        };
+        let file_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new(default_directives));
 
         let file_layer = if config.json_format {
             fmt::layer()
@@ -192,4 +205,68 @@ pub fn init_logging(
 
     let _ = tracing_subscriber::registry().with(layers).try_init();
     Ok(guard)
+}
+
+pub fn default_error_log_path() -> PathBuf {
+    LoggingConfig::default_log_dir().join("errors.log")
+}
+
+pub fn default_parse_error_dump_path() -> PathBuf {
+    LoggingConfig::default_log_dir().join("last_parse_error.json")
+}
+
+/// Appends a structured entry to `~/.cache/llim/errors.log` and saves the raw GraphQL
+/// response body to `~/.cache/llim/last_parse_error.json` when a JSON parse failure occurs.
+pub fn record_parse_error_dump(
+    operation: &str,
+    err: &serde_json::Error,
+    snippet: &str,
+    raw_body: &str,
+) {
+    let log_dir = LoggingConfig::default_log_dir();
+    let _ = std::fs::create_dir_all(&log_dir);
+    let now = Utc::now().to_rfc3339();
+
+    let err_log_path = log_dir.join("errors.log");
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&err_log_path)
+    {
+        let _ = writeln!(
+            f,
+            "[{now}] PARSE_ERROR operation={operation} line={} col={} error=\"{err}\" snippet={snippet:?}",
+            err.line(),
+            err.column()
+        );
+    }
+
+    let dump_path = log_dir.join("last_parse_error.json");
+    let dump = serde_json::json!({
+        "timestamp": now,
+        "operation": operation,
+        "error": err.to_string(),
+        "line": err.line(),
+        "column": err.column(),
+        "snippet": snippet,
+        "raw_response": raw_body,
+    });
+    if let Ok(pretty) = serde_json::to_string_pretty(&dump) {
+        let _ = std::fs::write(dump_path, pretty);
+    }
+}
+
+/// Appends any sync, mutation, or application error to `~/.cache/llim/errors.log`.
+pub fn append_error_log(category: &str, detail: &str) {
+    let log_dir = LoggingConfig::default_log_dir();
+    let _ = std::fs::create_dir_all(&log_dir);
+    let now = Utc::now().to_rfc3339();
+    let err_log_path = log_dir.join("errors.log");
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&err_log_path)
+    {
+        let _ = writeln!(f, "[{now}] {category}: {detail}");
+    }
 }

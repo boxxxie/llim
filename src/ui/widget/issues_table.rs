@@ -75,7 +75,7 @@ impl IssuesTableState {
         self.set_rows(rows);
     }
 
-    fn sort_rows(&self, rows: &mut [Issue]) {
+    fn sort_rows(&self, rows: &mut Vec<Issue>) {
         match self.sort_order {
             IssueSortOrder::PriorityAndUpdated => {
                 rows.sort_by(|a, b| {
@@ -100,6 +100,65 @@ impl IssuesTableState {
             }
             IssueSortOrder::Identifier => {
                 rows.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+            }
+            IssueSortOrder::EpicsFirst => {
+                let mut epics: Vec<Issue> = Vec::new();
+                let mut non_epics: Vec<Issue> = Vec::new();
+                for issue in rows.drain(..) {
+                    if issue.is_epic() {
+                        epics.push(issue);
+                    } else {
+                        non_epics.push(issue);
+                    }
+                }
+                epics.sort_by(|a, b| {
+                    a.priority
+                        .cmp(&b.priority)
+                        .then_with(|| b.updated_at.cmp(&a.updated_at))
+                });
+
+                let mut placed_ids: HashSet<IssueId> = HashSet::new();
+                let mut out: Vec<Issue> = Vec::with_capacity(epics.len() + non_epics.len());
+
+                for epic in epics {
+                    let epic_id = epic.id.clone();
+                    let epic_ident = epic.identifier.clone();
+                    placed_ids.insert(epic_id.clone());
+                    out.push(epic);
+
+                    let mut children: Vec<Issue> = non_epics
+                        .iter()
+                        .filter(|cand| {
+                            !placed_ids.contains(&cand.id)
+                                && (cand.parent_id.as_ref() == Some(&epic_id)
+                                    || cand.parent_identifier.as_ref() == Some(&epic_ident))
+                        })
+                        .cloned()
+                        .collect();
+                    children.sort_by(|a, b| {
+                        a.state_category
+                            .cmp(&b.state_category)
+                            .then_with(|| a.priority.cmp(&b.priority))
+                            .then_with(|| a.identifier.cmp(&b.identifier))
+                    });
+                    for child in children {
+                        placed_ids.insert(child.id.clone());
+                        out.push(child);
+                    }
+                }
+
+                let mut remaining: Vec<Issue> = non_epics
+                    .into_iter()
+                    .filter(|i| !placed_ids.contains(&i.id))
+                    .collect();
+                remaining.sort_by(|a, b| {
+                    b.is_sub_issue()
+                        .cmp(&a.is_sub_issue())
+                        .then_with(|| a.priority.cmp(&b.priority))
+                        .then_with(|| b.updated_at.cmp(&a.updated_at))
+                });
+                out.extend(remaining);
+                *rows = out;
             }
         }
     }
@@ -251,10 +310,18 @@ impl StatefulWidget for IssuesTableWidget<'_> {
             } else {
                 theme().assignee
             };
-            let labels = if issue.labels.is_empty() {
-                "—".to_string()
-            } else {
+            let labels = if !issue.labels.is_empty() {
                 issue.labels.join(", ")
+            } else if issue.is_epic() {
+                if !issue.sub_issues.is_empty() {
+                    format!("{} sub-issues", issue.sub_issues.len())
+                } else {
+                    "umbrella epic".to_string()
+                }
+            } else if let Some(parent_ident) = &issue.parent_identifier {
+                format!("epic:{parent_ident}")
+            } else {
+                "—".to_string()
             };
             let title_prefix = if issue.has_unacknowledged_mention {
                 "[@] "
@@ -263,6 +330,37 @@ impl StatefulWidget for IssuesTableWidget<'_> {
             } else {
                 ""
             };
+
+            let id_cell = if issue.is_epic() {
+                Cell::from(Line::from(vec![
+                    Span::styled("◆ ", theme().epic_badge),
+                    Span::styled(issue.identifier.as_str(), theme().epic_id),
+                ]))
+            } else if state.sort_order == IssueSortOrder::EpicsFirst && issue.is_sub_issue() {
+                Cell::from(Line::from(vec![
+                    Span::styled("↳ ", theme().sub_issue_badge),
+                    Span::styled(issue.identifier.as_str(), theme().issue_id),
+                ]))
+            } else {
+                Cell::from(Span::styled(issue.identifier.as_str(), theme().issue_id))
+            };
+
+            let mut title_spans = Vec::with_capacity(4);
+            if !title_prefix.is_empty() {
+                title_spans.push(Span::styled(title_prefix, theme().health_err));
+            }
+            if let Some(epic_badge) = issue.epic_badge_label() {
+                title_spans.push(Span::styled(format!("[{epic_badge}] "), theme().epic_badge));
+                title_spans.push(Span::styled(issue.clean_title(), theme().epic_title));
+            } else if let Some(parent_ident) = &issue.parent_identifier {
+                title_spans.push(Span::styled(
+                    format!("↳ {parent_ident} "),
+                    theme().sub_issue_badge,
+                ));
+                title_spans.push(Span::styled(issue.title.as_str(), theme().issue_title));
+            } else {
+                title_spans.push(Span::styled(issue.title.as_str(), theme().issue_title));
+            }
 
             let mut row_cells = Vec::with_capacity(10);
             if has_sel {
@@ -273,7 +371,7 @@ impl StatefulWidget for IssuesTableWidget<'_> {
                 }
             }
             row_cells.extend([
-                Cell::from(Span::styled(issue.identifier.as_str(), theme().issue_id)),
+                id_cell,
                 Cell::from(Span::styled(issue.team_key.as_str(), theme().team_badge)),
                 Cell::from(Span::styled(proj, theme().project_name)),
                 Cell::from(Span::styled(
@@ -284,14 +382,7 @@ impl StatefulWidget for IssuesTableWidget<'_> {
                     issue.priority.short_label(),
                     theme().priority_style(issue.priority),
                 )),
-                Cell::from(Line::from(vec![
-                    if !title_prefix.is_empty() {
-                        Span::styled(title_prefix, theme().health_err)
-                    } else {
-                        Span::raw("")
-                    },
-                    Span::styled(issue.title.as_str(), theme().issue_title),
-                ])),
+                Cell::from(Line::from(title_spans)),
                 Cell::from(Span::styled(assignee, assignee_style)),
                 Cell::from(Span::styled(labels, theme().label_badge)),
                 Cell::from(Span::styled(
@@ -308,7 +399,7 @@ impl StatefulWidget for IssuesTableWidget<'_> {
             widths.push(Constraint::Length(4));
         }
         widths.extend([
-            Constraint::Length(10),
+            Constraint::Length(11),
             Constraint::Length(8),
             Constraint::Length(18),
             Constraint::Length(14),

@@ -34,7 +34,7 @@ use crate::{
         default_config_path, default_db_path, default_quack_token_path, load_config,
         resolve_api_key,
     },
-    domain::HydrationState,
+    domain::{CURRENT_CACHE_SCHEMA_VERSION, HydrationState},
     event::{EventHandler, LlimEvent},
     logging::{LoggingConfig, init_logging},
     rendering::render_main_ui,
@@ -79,8 +79,26 @@ struct CliArgs {
     debug: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        // M_ARENA_MAX = -8: restrict glibc malloc to a single arena so worker threads
+        // don't reserve multiple 64 MB virtual memory arenas.
+        let _ = mallopt(-8, 1);
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime")
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     let args = CliArgs::parse();
     let config_path = args.config.unwrap_or_else(default_config_path);
 
@@ -128,6 +146,18 @@ async fn main() -> Result<()> {
         println!("config_path: {}", config_path.display());
         println!("duckdb_binary: {}", duckdb_bin.display());
         println!("database_path: {}", db_path.display());
+        println!(
+            "log_dir: {}",
+            LoggingConfig::default_log_dir().display()
+        );
+        println!(
+            "error_log: {}",
+            logging::default_error_log_path().display()
+        );
+        println!(
+            "parse_error_dump: {}",
+            logging::default_parse_error_dump_path().display()
+        );
         println!(
             "quack_server: {} (127.0.0.1:{})",
             if cfg.database.quack_server_enabled {
@@ -201,13 +231,16 @@ async fn main() -> Result<()> {
 }
 
 async fn run_sync_once(config_path: PathBuf) -> Result<()> {
+    let _log_guard = init_logging(LoggingConfig::from_env(false), None);
     let cfg = load_config(&config_path)?;
     let mut store = LinearStore::new(default_db_path());
     let mut db_cfg = cfg.database.clone();
     db_cfg.quack_server_enabled = false;
     store.init_duckdb_and_load(&db_cfg, None);
 
-    let initial_watermark = if !store.issues.is_empty() && store.sync_meta.issue_watermark.is_some()
+    let initial_watermark = if !store.issues.is_empty()
+        && store.sync_meta.issue_watermark.is_some()
+        && store.sync_meta.cache_schema_version >= CURRENT_CACHE_SCHEMA_VERSION
     {
         store.hydration_state = HydrationState::CatchUpDelta;
         store.sync_meta.issue_watermark

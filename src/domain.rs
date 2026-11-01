@@ -48,6 +48,7 @@ pub enum IssueSortOrder {
     PriorityAndUpdated,
     StateAndPriority,
     Identifier,
+    EpicsFirst,
 }
 
 impl IssueSortOrder {
@@ -57,7 +58,8 @@ impl IssueSortOrder {
             Self::CreatedDesc => Self::PriorityAndUpdated,
             Self::PriorityAndUpdated => Self::StateAndPriority,
             Self::StateAndPriority => Self::Identifier,
-            Self::Identifier => Self::UpdatedDesc,
+            Self::Identifier => Self::EpicsFirst,
+            Self::EpicsFirst => Self::UpdatedDesc,
         }
     }
 
@@ -68,6 +70,7 @@ impl IssueSortOrder {
             Self::PriorityAndUpdated => "Pri+Updated",
             Self::StateAndPriority => "State+Pri",
             Self::Identifier => "ID",
+            Self::EpicsFirst => "Epics+Tree",
         }
     }
 }
@@ -274,6 +277,44 @@ impl Display for AttentionReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubIssueSummary {
+    pub id: IssueId,
+    pub identifier: CompactString,
+    pub title: CompactString,
+    pub state_name: CompactString,
+    pub state_color: CompactString,
+    pub state_category: StateCategory,
+    pub priority: IssuePriority,
+    #[serde(default)]
+    pub assignee_name: Option<CompactString>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelatedIssueSummary {
+    pub id: IssueId,
+    pub identifier: CompactString,
+    pub title: CompactString,
+    pub relation_type: CompactString,
+    pub state_name: CompactString,
+    pub state_color: CompactString,
+    pub state_category: StateCategory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpicBreakdown {
+    pub is_umbrella_prefix: bool,
+    pub sub_issues_done: usize,
+    pub sub_issues_in_progress: usize,
+    pub sub_issues_todo: usize,
+    pub sub_issues_canceled: usize,
+    pub sub_issues_total: usize,
+    pub checklist_done: usize,
+    pub checklist_total: usize,
+    pub checklist_items: Vec<(bool, String)>,
+    pub milestones: Vec<(usize, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
     pub id: IssueId,
     pub identifier: CompactString,
@@ -297,6 +338,16 @@ pub struct Issue {
     #[serde(default)]
     pub label_ids: Vec<LabelId>,
     pub blocked_by: Vec<CompactString>,
+    #[serde(default)]
+    pub parent_id: Option<IssueId>,
+    #[serde(default)]
+    pub parent_identifier: Option<CompactString>,
+    #[serde(default)]
+    pub parent_title: Option<CompactString>,
+    #[serde(default)]
+    pub sub_issues: Vec<SubIssueSummary>,
+    #[serde(default)]
+    pub related_issues: Vec<RelatedIssueSummary>,
     pub has_unacknowledged_mention: bool,
     pub git_branch_name: Option<CompactString>,
     pub url: CompactString,
@@ -311,6 +362,102 @@ pub struct Issue {
 impl Issue {
     pub fn is_active(&self) -> bool {
         self.archived_at.is_none() && self.state_category.is_active()
+    }
+
+    pub fn has_epic_title_prefix(&self) -> bool {
+        let t = self.title.trim_start();
+        t.len() >= 6 && t[..6].eq_ignore_ascii_case("[epic]")
+            || t.len() >= 5 && t[..5].eq_ignore_ascii_case("epic:")
+    }
+
+    pub fn is_epic(&self) -> bool {
+        !self.sub_issues.is_empty()
+            || self.has_epic_title_prefix()
+            || self
+                .labels
+                .iter()
+                .any(|l| l.eq_ignore_ascii_case("epic") || l.eq_ignore_ascii_case("umbrella"))
+    }
+
+    pub fn is_sub_issue(&self) -> bool {
+        self.parent_id.is_some() || self.parent_identifier.is_some()
+    }
+
+    /// Strips a leading `[Epic]` or `Epic:` prefix so the title does not duplicate the styled Epic badge.
+    pub fn clean_title(&self) -> &str {
+        let t = self.title.trim();
+        let rest = if t.len() >= 6 && t[..6].eq_ignore_ascii_case("[epic]") {
+            &t[6..]
+        } else if t.len() >= 5 && t[..5].eq_ignore_ascii_case("epic:") {
+            &t[5..]
+        } else {
+            return t;
+        };
+        let trimmed = rest.trim_start_matches([' ', '-', '—', ':']);
+        if trimmed.is_empty() {
+            t
+        } else {
+            trimmed
+        }
+    }
+
+    pub fn epic_breakdown(&self) -> Option<EpicBreakdown> {
+        if !self.is_epic() {
+            return None;
+        }
+        let mut sub_issues_done = 0;
+        let mut sub_issues_in_progress = 0;
+        let mut sub_issues_todo = 0;
+        let mut sub_issues_canceled = 0;
+        for sub in &self.sub_issues {
+            match sub.state_category {
+                StateCategory::Completed => sub_issues_done += 1,
+                StateCategory::Started => sub_issues_in_progress += 1,
+                StateCategory::Canceled => sub_issues_canceled += 1,
+                StateCategory::Unstarted | StateCategory::Triage | StateCategory::Backlog => {
+                    sub_issues_todo += 1;
+                }
+            }
+        }
+        let sub_issues_total = self.sub_issues.len();
+
+        let (checklist_items, milestones) = self
+            .description
+            .as_deref()
+            .map(parse_markdown_epic_items)
+            .unwrap_or_default();
+        let checklist_done = checklist_items.iter().filter(|(done, _)| *done).count();
+        let checklist_total = checklist_items.len();
+
+        Some(EpicBreakdown {
+            is_umbrella_prefix: self.has_epic_title_prefix(),
+            sub_issues_done,
+            sub_issues_in_progress,
+            sub_issues_todo,
+            sub_issues_canceled,
+            sub_issues_total,
+            checklist_done,
+            checklist_total,
+            checklist_items,
+            milestones,
+        })
+    }
+
+    /// Concise badge text for table rows, e.g. `"◆ EPIC 2/6"`, `"◆ EPIC 0/2"`, `"◆ EPIC • 3pt"`, or `"◆ EPIC"`.
+    pub fn epic_badge_label(&self) -> Option<CompactString> {
+        let bd = self.epic_breakdown()?;
+        if bd.sub_issues_total > 0 {
+            let eff_total = (bd.sub_issues_total - bd.sub_issues_canceled)
+                .max(bd.sub_issues_done)
+                .max(1);
+            Some(format!("◆ EPIC {}/{}", bd.sub_issues_done, eff_total).into())
+        } else if bd.checklist_total > 0 {
+            Some(format!("◆ EPIC {}/{}", bd.checklist_done, bd.checklist_total).into())
+        } else if !bd.milestones.is_empty() {
+            Some(format!("◆ EPIC • {}pt", bd.milestones.len()).into())
+        } else {
+            Some("◆ EPIC".into())
+        }
     }
 
     /// Returns `(name, is_creator_fallback)` for display in tables and inspectors.
@@ -469,6 +616,41 @@ pub struct Comment {
     pub updated_at: DateTime<Utc>,
 }
 
+fn clean_markdown_inline(raw: &str) -> String {
+    raw.replace("**", "").trim().to_string()
+}
+
+fn parse_markdown_epic_items(desc: &str) -> (Vec<(bool, String)>, Vec<(usize, String)>) {
+    let mut checklist = Vec::new();
+    let mut milestones = Vec::new();
+    for line in desc.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("- [ ] ")
+            .or_else(|| trimmed.strip_prefix("* [ ] "))
+        {
+            checklist.push((false, clean_markdown_inline(rest)));
+        } else if let Some(rest) = trimmed
+            .strip_prefix("- [x] ")
+            .or_else(|| trimmed.strip_prefix("- [X] "))
+            .or_else(|| trimmed.strip_prefix("* [x] "))
+            .or_else(|| trimmed.strip_prefix("* [X] "))
+        {
+            checklist.push((true, clean_markdown_inline(rest)));
+        } else if let Some(dot_idx) = trimmed.find(". ") {
+            if dot_idx <= 3 && trimmed[..dot_idx].chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(num) = trimmed[..dot_idx].parse::<usize>() {
+                    let rest = trimmed[dot_idx + 2..].trim();
+                    if !rest.is_empty() {
+                        milestones.push((num, clean_markdown_inline(rest)));
+                    }
+                }
+            }
+        }
+    }
+    (checklist, milestones)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueHistoryEntry {
     pub id: HistoryId,
@@ -486,6 +668,14 @@ pub struct IssueHistoryEntry {
     pub to_assignee: Option<CompactString>,
     pub from_project: Option<CompactString>,
     pub to_project: Option<CompactString>,
+    #[serde(default)]
+    pub from_title: Option<CompactString>,
+    #[serde(default)]
+    pub to_title: Option<CompactString>,
+    #[serde(default)]
+    pub from_parent: Option<CompactString>,
+    #[serde(default)]
+    pub to_parent: Option<CompactString>,
     pub added_labels: Vec<CompactString>,
     pub removed_labels: Vec<CompactString>,
     pub updated_description: bool,
@@ -495,6 +685,24 @@ pub struct IssueHistoryEntry {
 impl IssueHistoryEntry {
     pub fn summary(&self) -> CompactString {
         let mut parts: Vec<String> = Vec::new();
+        if let Some(ref to_t) = self.to_title {
+            let is_now_epic = {
+                let t = to_t.trim_start();
+                t.len() >= 6 && t[..6].eq_ignore_ascii_case("[epic]")
+            };
+            if is_now_epic {
+                parts.push(format!("Converted to Epic: \"{to_t}\""));
+            } else if let Some(ref from_t) = self.from_title {
+                parts.push(format!("Title: \"{from_t}\" -> \"{to_t}\""));
+            } else {
+                parts.push(format!("Title -> \"{to_t}\""));
+            }
+        }
+        if let Some(ref to_par) = self.to_parent {
+            parts.push(format!("Parent Epic -> {to_par}"));
+        } else if let Some(ref from_par) = self.from_parent {
+            parts.push(format!("Removed from Epic {from_par}"));
+        }
         if let Some(ref to_s) = self.to_state {
             if let Some(ref from_s) = self.from_state {
                 parts.push(format!("State: {from_s} -> {to_s}"));
@@ -622,6 +830,8 @@ pub enum HydrationState {
     LiveSteadyState,
 }
 
+pub const CURRENT_CACHE_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncMeta {
     pub cache_schema_version: u32,
@@ -639,7 +849,7 @@ pub struct SyncMeta {
 impl Default for SyncMeta {
     fn default() -> Self {
         Self {
-            cache_schema_version: 1,
+            cache_schema_version: CURRENT_CACHE_SCHEMA_VERSION,
             synced_team_keys: Vec::new(),
             synced_max_age_days: None,
             issue_watermark: None,

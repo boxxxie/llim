@@ -74,56 +74,61 @@ pub fn render_main_ui(
         .render(f_area, buf);
     }
 
-    let (top_area, inspector_area) = if widgets.show_inspector && body_area.height >= 10 {
-        let split = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(body_area);
-        (split[0], Some(split[1]))
+    if let Some(issue_page) = widgets.open_issue_page() {
+        issue_page.borrow().render_in(body_area, buf);
     } else {
-        (body_area, None)
-    };
+        let (top_area, inspector_area) = if widgets.show_inspector && body_area.height >= 10 {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(body_area);
+            (split[0], Some(split[1]))
+        } else {
+            (body_area, None)
+        };
 
-    let top_focused =
-        !(widgets.focus_inspector && widgets.show_inspector) && widgets.modal_stack.is_empty();
+        let top_focused =
+            !(widgets.focus_inspector && widgets.show_inspector) && widgets.modal_stack.is_empty();
 
-    match widgets.active_view {
-        ViewKind::Issues => {
-            IssuesTableWidget::new(top_focused, &widgets.selected_issue_ids).render(
-                top_area,
+        match widgets.active_view {
+            ViewKind::Issues => {
+                IssuesTableWidget::new(top_focused, &widgets.selected_issue_ids).render(
+                    top_area,
+                    buf,
+                    &mut widgets.issues_view,
+                );
+            }
+            ViewKind::Attention => {
+                AttentionTableWidget::new(top_focused, &widgets.selected_issue_ids).render(
+                    top_area,
+                    buf,
+                    &mut widgets.attention_view,
+                );
+            }
+            ViewKind::Activity => {
+                ActivityFeedWidget::new(top_focused)
+                    .render(top_area, buf, &mut widgets.activity_feed);
+            }
+        }
+
+        if let Some(insp_area) = inspector_area {
+            let insp_focused =
+                widgets.focus_inspector && widgets.show_inspector && widgets.modal_stack.is_empty();
+            DetailsInspectorWidget::new(insp_focused).render(
+                insp_area,
                 buf,
-                &mut widgets.issues_view,
+                &mut widgets.inspector,
             );
         }
-        ViewKind::Attention => {
-            AttentionTableWidget::new(top_focused, &widgets.selected_issue_ids).render(
-                top_area,
-                buf,
-                &mut widgets.attention_view,
-            );
-        }
-        ViewKind::Activity => {
-            ActivityFeedWidget::new(top_focused).render(top_area, buf, &mut widgets.activity_feed);
-        }
-    }
-
-    if let Some(insp_area) = inspector_area {
-        let insp_focused =
-            widgets.focus_inspector && widgets.show_inspector && widgets.modal_stack.is_empty();
-        DetailsInspectorWidget::new(insp_focused).render(
-            insp_area,
-            buf,
-            &mut widgets.inspector,
-        );
     }
 
     let shortcuts = widgets.active_shortcuts();
     Paragraph::new(shortcuts.as_line()).render(footer_area, buf);
 
-    // Render modal stack on top (ProjectDetailsPopup, ConfigPopup, HelpPopup)
+    // Render modal stack on top (ProjectDetailsPopup, ConfigPopup, HelpPopup, write pickers)
     for modal in &widgets.modal_stack {
         match &modal.state {
-            ModalState::IssueDetails(p) => p.borrow().render_in(area, buf),
+            ModalState::IssueDetails(_) => {}
             ModalState::ProjectDetails(p) => p.borrow().render_in(area, buf),
             ModalState::ActivityDetails(p) => p.borrow().render_in(area, buf),
             ModalState::Config(p) => p.borrow().render_in(area, buf),
@@ -235,7 +240,13 @@ fn render_top_chrome(
         Span::raw(" "),
         Span::styled(format!("[{proj_pill_text}]"), theme().scope_pill),
     ];
-    if !widgets.selected_issue_ids.is_empty() {
+    if let Some(issue_page) = widgets.open_issue_page() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!(" [Issue: {}] ", issue_page.borrow().issue().identifier),
+            theme().active_tab,
+        ));
+    } else if !widgets.selected_issue_ids.is_empty() {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
             format!(" [✓ Selected: {}] ", widgets.selected_issue_ids.len()),

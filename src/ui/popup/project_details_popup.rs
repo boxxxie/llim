@@ -10,7 +10,10 @@ use crate::{
     domain::{Issue, Project},
     gruvbox::Gruvbox,
     theme::theme,
-    ui::{format_relative_time, fx::window::Window, popup::utility::CenteredShrink},
+    ui::{
+        format_relative_time, fx::window::Window, markdown::render_markdown,
+        popup::utility::CenteredShrink,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -134,12 +137,7 @@ impl ProjectDetailsPopup {
                 theme().input_description,
             )));
         } else {
-            for l in self.project.description.lines() {
-                lines.push(Line::from(Span::styled(
-                    l.to_string(),
-                    theme().issue_title,
-                )));
-            }
+            lines.extend(render_markdown(&self.project.description));
         }
 
         lines.push(Line::from(""));
@@ -150,9 +148,23 @@ impl ProjectDetailsPopup {
                 .add_modifier(Modifier::BOLD),
         )));
 
-        for issue in self.project_issues.iter().filter(|i| i.is_active()).take(40) {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {:<10}", issue.identifier), theme().issue_id),
+        let mut active_issues: Vec<&Issue> =
+            self.project_issues.iter().filter(|i| i.is_active()).collect();
+        active_issues.sort_by(|a, b| {
+            b.is_epic()
+                .cmp(&a.is_epic())
+                .then_with(|| a.priority.cmp(&b.priority))
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
+
+        for issue in active_issues.into_iter().take(40) {
+            let id_span = if issue.is_epic() {
+                Span::styled(format!("  ◆ {:<8}", issue.identifier), theme().epic_id)
+            } else {
+                Span::styled(format!("  {:<10}", issue.identifier), theme().issue_id)
+            };
+            let mut row_spans = vec![
+                id_span,
                 Span::styled(
                     format!("{:<14}", issue.state_name),
                     theme().state_category_style(issue.state_category, Some(&issue.state_color)),
@@ -161,8 +173,20 @@ impl ProjectDetailsPopup {
                     format!("{:<6}", issue.priority.short_label()),
                     theme().priority_style(issue.priority),
                 ),
-                Span::styled(issue.title.as_str(), theme().issue_title),
-            ]));
+            ];
+            if let Some(epic_badge) = issue.epic_badge_label() {
+                row_spans.push(Span::styled(format!("[{epic_badge}] "), theme().epic_badge));
+                row_spans.push(Span::styled(issue.clean_title(), theme().epic_title));
+            } else if let Some(ref parent_ident) = issue.parent_identifier {
+                row_spans.push(Span::styled(
+                    format!("↳ {parent_ident} "),
+                    theme().sub_issue_badge,
+                ));
+                row_spans.push(Span::styled(issue.title.as_str(), theme().issue_title));
+            } else {
+                row_spans.push(Span::styled(issue.title.as_str(), theme().issue_title));
+            }
+            lines.push(Line::from(row_spans));
         }
 
         Paragraph::new(lines)

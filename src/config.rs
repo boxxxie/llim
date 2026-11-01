@@ -77,11 +77,11 @@ pub struct PollingSection {
     pub full_reconcile_minutes: u64,
     #[serde(default)]
     pub max_pages_per_poll: Option<u32>,
-    #[serde(default)]
+    #[serde(default = "default_max_stored_issues")]
     pub max_stored_issues: Option<usize>,
     #[serde(default)]
     pub max_age_days: Option<u32>,
-    #[serde(default)]
+    #[serde(default = "default_max_activity_events")]
     pub max_activity_events: Option<usize>,
 }
 
@@ -93,15 +93,23 @@ fn default_full_reconcile_minutes() -> u64 {
     20
 }
 
+fn default_max_stored_issues() -> Option<usize> {
+    Some(500)
+}
+
+fn default_max_activity_events() -> Option<usize> {
+    Some(300)
+}
+
 impl Default for PollingSection {
     fn default() -> Self {
         Self {
             delta_poll_seconds: default_delta_poll_seconds(),
             full_reconcile_minutes: default_full_reconcile_minutes(),
             max_pages_per_poll: None,
-            max_stored_issues: None,
+            max_stored_issues: default_max_stored_issues(),
             max_age_days: None,
-            max_activity_events: None,
+            max_activity_events: default_max_activity_events(),
         }
     }
 }

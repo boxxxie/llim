@@ -311,7 +311,8 @@ impl InputProcessor for NormalModeProcessor {
         }
         Shortcuts::new(vec![
             Shortcut::new("1/2/3", "views"),
-            Shortcut::new("←/→", "scroll issue"),
+            Shortcut::new("Enter", "open issue"),
+            Shortcut::new("←/→", "scroll insp"),
             Shortcut::new("Spc/v/V", "select"),
             Shortcut::new("x", "state"),
             Shortcut::new("!", "pri"),
@@ -320,7 +321,6 @@ impl InputProcessor for NormalModeProcessor {
             Shortcut::new("l", "labels"),
             Shortcut::new("c", "comment"),
             Shortcut::new("e/I", "edit/new"),
-            Shortcut::new(",", "config"),
             Shortcut::new("?", "help"),
         ])
     }

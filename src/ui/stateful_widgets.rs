@@ -148,6 +148,18 @@ impl StatefulWidgets {
         }
     }
 
+    pub fn open_issue_page(&self) -> Option<&Rc<RefCell<IssueDetailsPopup>>> {
+        self.modal_stack.iter().rev().find_map(|frame| match &frame.state {
+            ModalState::IssueDetails(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    pub fn open_issue_details_id(&self) -> Option<IssueId> {
+        self.open_issue_page()
+            .map(|p| p.borrow().issue().id.clone())
+    }
+
     pub fn push_issue_details(&mut self, issue_id: &IssueId, store: &LinearStore) -> bool {
         let Some(issue) = store.issues.get(issue_id).cloned() else {
             return false;
@@ -164,6 +176,17 @@ impl StatefulWidgets {
             .unwrap_or_default();
         let comment_draft = store.comment_draft(issue_id).map(ToString::to_string);
         let needs_load = issue.details_synced_at != Some(issue.updated_at);
+
+        if let Some(existing) = self.open_issue_page() {
+            existing.borrow_mut().set_issue(
+                issue,
+                comments,
+                history,
+                comment_draft,
+                needs_load,
+            );
+            return needs_load;
+        }
 
         let popup = Rc::new(RefCell::new(IssueDetailsPopup::new(
             issue,
@@ -207,6 +230,12 @@ impl StatefulWidgets {
                     );
                 }
             }
+        }
+    }
+
+    pub fn refresh_open_issue_details(&mut self, store: &LinearStore) {
+        if let Some(id) = self.open_issue_details_id() {
+            self.update_open_issue_details(&id, store);
         }
     }
 
@@ -333,7 +362,7 @@ impl StatefulWidgets {
         }
     }
 
-    pub fn selected_issue<'a>(&'a self, store: &'a LinearStore) -> Option<&'a Issue> {
+    pub fn selected_list_issue<'a>(&'a self, store: &'a LinearStore) -> Option<&'a Issue> {
         match self.active_view {
             ViewKind::Issues => self.issues_view.selected_issue(),
             ViewKind::Attention => self.attention_view.selected_issue(),
@@ -342,6 +371,15 @@ impl StatefulWidgets {
                 store.issues.get(issue_id)
             }
         }
+    }
+
+    pub fn selected_issue<'a>(&'a self, store: &'a LinearStore) -> Option<&'a Issue> {
+        if let Some(id) = self.open_issue_details_id() {
+            if let Some(iss) = store.issues.get(&id) {
+                return Some(iss);
+            }
+        }
+        self.selected_list_issue(store)
     }
 
     pub fn toggle_select_current(&mut self, store: &LinearStore, move_down: bool) {
@@ -392,6 +430,10 @@ impl StatefulWidgets {
     /// Returns the multi-selected issues (in current table order) if any are selected,
     /// or a 1-element `Vec` with the focused cursor issue when no multi-selection is active.
     pub fn target_issues(&self, store: &LinearStore) -> Vec<Issue> {
+        if let Some(id) = self.open_issue_details_id() {
+            return store.issues.get(&id).cloned().into_iter().collect();
+        }
+
         if self.selected_issue_ids.is_empty() {
             return self.selected_issue(store).cloned().into_iter().collect();
         }
@@ -604,7 +646,25 @@ impl StatefulWidgets {
                     .labels
                     .iter()
                     .any(|l| l.to_ascii_lowercase().contains(&query_lower));
-                if !(id_match || title_match || proj_match || assignee_match || label_match) {
+                let epic_match = (query_lower == "epic" || query_lower == "epics") && issue.is_epic();
+                let parent_match = issue
+                    .parent_identifier
+                    .as_ref()
+                    .map(|p| p.to_ascii_lowercase().contains(&query_lower))
+                    .unwrap_or(false)
+                    || issue
+                        .parent_title
+                        .as_ref()
+                        .map(|p| p.to_ascii_lowercase().contains(&query_lower))
+                        .unwrap_or(false);
+                if !(id_match
+                    || title_match
+                    || proj_match
+                    || assignee_match
+                    || label_match
+                    || epic_match
+                    || parent_match)
+                {
                     return false;
                 }
             }
@@ -674,8 +734,25 @@ impl StatefulWidgets {
             .collect();
 
         self.activity_feed.set_events(feed_events);
+        self.refresh_open_issue_details(store);
         let _ = self.sync_inspector(store);
         self.last_generation = store.generation;
+    }
+
+    pub fn advance_list_cursor(&mut self, next: bool) {
+        if next {
+            match self.active_view {
+                ViewKind::Issues => self.issues_view.next(),
+                ViewKind::Attention => self.attention_view.next(),
+                ViewKind::Activity => self.activity_feed.next(),
+            }
+        } else {
+            match self.active_view {
+                ViewKind::Issues => self.issues_view.previous(),
+                ViewKind::Attention => self.attention_view.previous(),
+                ViewKind::Activity => self.activity_feed.previous(),
+            }
+        }
     }
 
     pub fn cursor_next(&mut self) {

@@ -169,7 +169,7 @@ impl LlimApp {
                 self.widgets.set_focus_inspector(false);
                 self.sync_inspector_and_backfill();
             }
-            LlimEvent::FocusToggle | LlimEvent::OpenSelectedDetails => {
+            LlimEvent::FocusToggle => {
                 if let Some(issue_id) = self
                     .widgets
                     .selected_issue(&self.store)
@@ -183,6 +183,24 @@ impl LlimApp {
                 }
                 self.widgets.toggle_focus_inspector();
                 self.sync_inspector_and_backfill();
+            }
+            LlimEvent::OpenSelectedDetails => {
+                if let Some(issue_id) = self
+                    .widgets
+                    .selected_issue(&self.store)
+                    .map(|i| i.id.clone())
+                {
+                    ui_events.push(LlimEvent::IssueDetailsOpen(issue_id));
+                } else if self.widgets.active_view == ViewKind::Activity {
+                    if let Some(act_id) = self
+                        .widgets
+                        .activity_feed
+                        .selected_event()
+                        .map(|a| a.id.clone())
+                    {
+                        ui_events.push(LlimEvent::ActivityDetailsOpen(act_id));
+                    }
+                }
             }
             LlimEvent::ToggleActivityFeed => {
                 self.widgets.toggle_show_inspector();
@@ -320,6 +338,25 @@ impl LlimApp {
                 if self.widgets.pop_modal() {
                     self.effects
                         .register_popup_close(IssueDetailsPopup::popup_area(self.terminal_area));
+                }
+            }
+            LlimEvent::IssueDetailsNext | LlimEvent::IssueDetailsPrev => {
+                let next = matches!(event, LlimEvent::IssueDetailsNext);
+                self.widgets.advance_list_cursor(next);
+                self.sync_inspector_and_backfill();
+                if let Some(issue_id) = self
+                    .widgets
+                    .selected_list_issue(&self.store)
+                    .map(|i| i.id.clone())
+                {
+                    self.store.acknowledge_issue_mention(&issue_id);
+                    let needs_load = self.widgets.push_issue_details(&issue_id, &self.store);
+                    self.widgets.recompute_projections(&self.store);
+                    if needs_load {
+                        if let Some(ref poller) = self.poller {
+                            poller.promote_issue(issue_id);
+                        }
+                    }
                 }
             }
             LlimEvent::ActivityDetailsOpen(activity_id) => {

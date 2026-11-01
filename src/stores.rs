@@ -16,12 +16,32 @@ use tracing::{debug, info, warn};
 use crate::{
     config::{default_quack_token_path, DatabaseSection},
     domain::{
-        ActivityEvent, ActivityKind, Comment, DomainChange, HydrationState, Issue,
-        IssueHistoryEntry, IssueLabel, Project, StateCategory, SyncMeta, Team, User, WorkflowState,
+        ActivityEvent, ActivityKind, CURRENT_CACHE_SCHEMA_VERSION, Comment, DomainChange,
+        HydrationState, Issue, IssueHistoryEntry, IssueLabel, Project, StateCategory,
+        SubIssueSummary, SyncMeta, Team, User, WorkflowState,
     },
     event::{BootstrapPayload, DeltaBatchPayload, IssueActivityPayload, LlimEvent},
     id::{ActivityId, HistoryId, IssueId, LabelId, ProjectId, StateId, TeamId, UserId},
 };
+
+const DEFAULT_HYDRATE_MAX_TEAMS: usize = 100;
+const DEFAULT_HYDRATE_MAX_STATES: usize = 500;
+const DEFAULT_HYDRATE_MAX_PROJECTS: usize = 200;
+const DEFAULT_HYDRATE_MAX_ISSUES: usize = 500;
+const DEFAULT_HYDRATE_MAX_COMMENTS: usize = 1000;
+const DEFAULT_HYDRATE_MAX_HISTORY: usize = 1000;
+const DEFAULT_HYDRATE_MAX_ACTIVITY_EVENTS: usize = 300;
+
+const DUCKDB_LOW_MEMORY_SQL: &str = "\
+SET threads=1;
+SET external_threads=1;
+SET async_threads=1;
+SET preserve_insertion_order=false;
+SET memory_limit='8MB';
+SET allocator_flush_threshold='512KB';
+SET allocator_bulk_deallocation_flush_threshold='512KB';
+SET wal_autocheckpoint='256KB';
+";
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS teams (
@@ -229,12 +249,14 @@ impl LinearStore {
         if self.db_path.exists() {
             self.load_existing_rows(&duckdb_bin);
         } else {
+            let init_sql = format!("{DUCKDB_LOW_MEMORY_SQL}\n{SCHEMA_SQL}");
             let _ = Command::new(&duckdb_bin)
+                .env("MALLOC_ARENA_MAX", "1")
                 .arg("-dark-mode")
                 .arg("-batch")
                 .arg(&self.db_path)
                 .arg("-c")
-                .arg(SCHEMA_SQL)
+                .arg(init_sql)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
@@ -245,67 +267,78 @@ impl LinearStore {
     }
 
     fn load_existing_rows(&mut self, duckdb_bin: &Path) {
+        let init_sql = format!("CHECKPOINT;\n{DUCKDB_LOW_MEMORY_SQL}\n{SCHEMA_SQL}");
         let _ = Command::new(duckdb_bin)
+            .env("MALLOC_ARENA_MAX", "1")
             .arg("-dark-mode")
             .arg("-batch")
             .arg(&self.db_path)
             .arg("-c")
-            .arg(SCHEMA_SQL)
+            .arg(init_sql)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
 
-        for team in query_payloads::<Team>(duckdb_bin, &self.db_path, "SELECT payload FROM teams;") {
+        let teams_sql = format!(
+            "SELECT payload FROM (SELECT payload FROM teams ORDER BY rowid DESC LIMIT {DEFAULT_HYDRATE_MAX_TEAMS});"
+        );
+        for team in query_payloads::<Team>(duckdb_bin, &self.db_path, &teams_sql) {
             self.teams.insert(team.id.clone(), team);
         }
-        for state in query_payloads::<WorkflowState>(
-            duckdb_bin,
-            &self.db_path,
-            "SELECT payload FROM states;",
-        ) {
+
+        let states_sql = format!(
+            "SELECT payload FROM (SELECT payload FROM states ORDER BY rowid DESC LIMIT {DEFAULT_HYDRATE_MAX_STATES});"
+        );
+        for state in query_payloads::<WorkflowState>(duckdb_bin, &self.db_path, &states_sql) {
             self.states.insert(state.id.clone(), state);
         }
-        for proj in
-            query_payloads::<Project>(duckdb_bin, &self.db_path, "SELECT payload FROM projects;")
-        {
+
+        let projects_sql = format!(
+            "SELECT payload FROM (SELECT payload FROM projects ORDER BY rowid DESC LIMIT {DEFAULT_HYDRATE_MAX_PROJECTS});"
+        );
+        for proj in query_payloads::<Project>(duckdb_bin, &self.db_path, &projects_sql) {
             self.projects.insert(proj.id.clone(), proj);
         }
-        for issue in
-            query_payloads::<Issue>(duckdb_bin, &self.db_path, "SELECT payload FROM issues;")
-        {
+
+        let issues_tail_scan = DEFAULT_HYDRATE_MAX_ISSUES.saturating_mul(4);
+        let issues_sql = format!(
+            "SELECT payload FROM (SELECT payload, updated_at FROM issues ORDER BY rowid DESC LIMIT {issues_tail_scan}) ORDER BY updated_at DESC LIMIT {DEFAULT_HYDRATE_MAX_ISSUES};"
+        );
+        for issue in query_payloads::<Issue>(duckdb_bin, &self.db_path, &issues_sql) {
             self.issues.insert(issue.id.clone(), issue);
         }
-        for comment in query_payloads::<Comment>(
-            duckdb_bin,
-            &self.db_path,
-            "SELECT payload FROM comments ORDER BY created_at ASC;",
-        ) {
+
+        let comments_sql = format!(
+            "SELECT payload FROM (SELECT payload, created_at FROM comments ORDER BY rowid DESC LIMIT {DEFAULT_HYDRATE_MAX_COMMENTS}) ORDER BY created_at ASC;"
+        );
+        for comment in query_payloads::<Comment>(duckdb_bin, &self.db_path, &comments_sql) {
             self.comments_by_issue
                 .entry(comment.issue_id.clone())
                 .or_default()
                 .push(comment);
         }
-        for entry in query_payloads::<IssueHistoryEntry>(
-            duckdb_bin,
-            &self.db_path,
-            "SELECT payload FROM issue_history ORDER BY created_at ASC;",
-        ) {
+
+        let history_sql = format!(
+            "SELECT payload FROM (SELECT payload, created_at FROM issue_history ORDER BY rowid DESC LIMIT {DEFAULT_HYDRATE_MAX_HISTORY}) ORDER BY created_at ASC;"
+        );
+        for entry in query_payloads::<IssueHistoryEntry>(duckdb_bin, &self.db_path, &history_sql) {
             self.history_by_issue
                 .entry(entry.issue_id.clone())
                 .or_default()
                 .push(entry);
         }
-        for ev in query_payloads::<ActivityEvent>(
-            duckdb_bin,
-            &self.db_path,
-            "SELECT payload FROM activity_events ORDER BY timestamp DESC;",
-        ) {
+
+        let activity_sql = format!(
+            "SELECT payload FROM (SELECT payload, timestamp FROM activity_events ORDER BY rowid DESC LIMIT {DEFAULT_HYDRATE_MAX_ACTIVITY_EVENTS}) ORDER BY timestamp DESC LIMIT {DEFAULT_HYDRATE_MAX_ACTIVITY_EVENTS};"
+        );
+        for ev in query_payloads::<ActivityEvent>(duckdb_bin, &self.db_path, &activity_sql) {
             self.activity_events.push_back(ev);
         }
+
         if let Some(meta) = query_payloads::<SyncMeta>(
             duckdb_bin,
             &self.db_path,
-            "SELECT payload FROM sync_meta WHERE id = 1;",
+            "SELECT payload FROM sync_meta WHERE id = 1 LIMIT 1;",
         )
         .into_iter()
         .next()
@@ -313,8 +346,10 @@ impl LinearStore {
             self.sync_meta = meta;
         }
 
-        // Recompute has_unacknowledged_mention from loaded comments & sync_meta
+        // Recompute has_unacknowledged_mention and epic hierarchy from loaded issues
         self.recompute_all_mention_flags();
+        let mut dummy_sql = String::new();
+        self.reconcile_epic_hierarchy(&mut dummy_sql);
         self.harvest_users_and_labels_from_issues();
         self.generation = self.generation.wrapping_add(1);
 
@@ -334,6 +369,7 @@ impl LinearStore {
         event_sender: Option<&Sender<LlimEvent>>,
     ) {
         let mut child: Child = match Command::new(duckdb_bin)
+            .env("MALLOC_ARENA_MAX", "1")
             .arg("-dark-mode")
             .arg("-batch")
             .arg(&self.db_path)
@@ -355,7 +391,10 @@ impl LinearStore {
         };
         let stdout = child.stdout.take();
 
-        let _ = writeln!(stdin, "{SCHEMA_SQL}");
+        let _ = writeln!(
+            stdin,
+            "CHECKPOINT;\n{DUCKDB_LOW_MEMORY_SQL}\n{SCHEMA_SQL}"
+        );
 
         let mut quack_listen_uri = None;
         let mut quack_token = None;
@@ -468,6 +507,9 @@ impl LinearStore {
         resolved_team_keys: &[CompactString],
         max_age_days: Option<u32>,
     ) -> bool {
+        if self.sync_meta.cache_schema_version < CURRENT_CACHE_SCHEMA_VERSION {
+            return true;
+        }
         if self.sync_meta.issue_watermark.is_none() || self.issues.is_empty() {
             return true;
         }
@@ -536,6 +578,8 @@ impl LinearStore {
             self.issues.insert(issue.id.clone(), issue);
         }
 
+        self.reconcile_epic_hierarchy(&mut sql);
+
         // Seed initial activity feed if empty from the 25 most recently updated issues
         if self.activity_events.is_empty() {
             let batch_id = self.next_batch_id();
@@ -574,6 +618,7 @@ impl LinearStore {
         }
 
         let watermark = payload.server_time - chrono::Duration::seconds(5);
+        self.sync_meta.cache_schema_version = CURRENT_CACHE_SCHEMA_VERSION;
         self.sync_meta.synced_team_keys = payload.resolved_team_keys;
         self.sync_meta.synced_max_age_days = max_age_days;
         self.sync_meta.issue_watermark = Some(watermark);
@@ -962,30 +1007,27 @@ impl LinearStore {
         if parent_metadata_changed {
             self.refresh_denormalized_issue_fields(&mut sql);
         }
+        self.reconcile_epic_hierarchy(&mut sql);
 
-        if let Some(max_ev) = max_activity_events {
-            while self.activity_events.len() > max_ev {
-                self.activity_events.pop_back();
-            }
+        let max_ev = max_activity_events.unwrap_or(DEFAULT_HYDRATE_MAX_ACTIVITY_EVENTS);
+        while self.activity_events.len() > max_ev {
+            self.activity_events.pop_back();
         }
 
-        if let Some(max_issues) = max_stored_issues {
-            if self.issues.len() > max_issues {
-                let mut by_age: Vec<(IssueId, bool, DateTime<Utc>)> = self
-                    .issues
-                    .values()
-                    .map(|i| (i.id.clone(), i.is_active(), i.updated_at))
-                    .collect();
-                // Evict oldest inactive issues first
-                by_age.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
-                let to_remove = self.issues.len().saturating_sub(max_issues);
-                for (id, _, _) in by_age.into_iter().take(to_remove) {
-                    self.issues.remove(&id);
-                    sql.push_str(&format!(
-                        "DELETE FROM issues WHERE id = '{}';\n",
-                        sql_escape(id.as_str())
-                    ));
-                }
+        let max_issues = max_stored_issues.unwrap_or(DEFAULT_HYDRATE_MAX_ISSUES);
+        if self.issues.len() > max_issues {
+            let mut by_age: Vec<(IssueId, bool, DateTime<Utc>)> = self
+                .issues
+                .values()
+                .map(|i| (i.id.clone(), i.is_active(), i.updated_at))
+                .collect();
+            // Evict oldest inactive issues from in-memory collections while leaving DuckDB rows untouched
+            by_age.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
+            let to_remove = self.issues.len().saturating_sub(max_issues);
+            for (id, _, _) in by_age.into_iter().take(to_remove) {
+                self.issues.remove(&id);
+                self.comments_by_issue.remove(&id);
+                self.history_by_issue.remove(&id);
             }
         }
 
@@ -1373,6 +1415,7 @@ impl LinearStore {
         sql.push_str("COMMIT;\n");
 
         self.issues.insert(issue.id.clone(), issue);
+        self.reconcile_epic_hierarchy(&mut sql);
         self.activity_events.push_front(act_ev);
         self.harvest_users_and_labels_from_issues();
         self.persist_sql(sql);
@@ -1528,6 +1571,76 @@ impl LinearStore {
         }
     }
 
+    /// Synchronizes parent-child Epic `sub_issues` and `parent_title`/`parent_identifier` across all
+    /// in-memory `Issue` records so child updates immediately reflect in their parent Epic.
+    fn reconcile_epic_hierarchy(&mut self, sql: &mut String) {
+        let mut children_by_parent: HashMap<IssueId, Vec<SubIssueSummary>> = HashMap::new();
+        let mut parent_info: HashMap<IssueId, (CompactString, CompactString)> = HashMap::new();
+
+        for issue in self.issues.values() {
+            parent_info.insert(
+                issue.id.clone(),
+                (issue.identifier.clone(), issue.title.clone()),
+            );
+            if let Some(ref pid) = issue.parent_id {
+                children_by_parent
+                    .entry(pid.clone())
+                    .or_default()
+                    .push(SubIssueSummary {
+                        id: issue.id.clone(),
+                        identifier: issue.identifier.clone(),
+                        title: issue.title.clone(),
+                        state_name: issue.state_name.clone(),
+                        state_color: issue.state_color.clone(),
+                        state_category: issue.state_category,
+                        priority: issue.priority,
+                        assignee_name: issue.assignee_name.clone(),
+                    });
+            }
+        }
+
+        for issue in self.issues.values_mut() {
+            let mut changed = false;
+
+            if let Some(ref pid) = issue.parent_id {
+                if let Some((p_ident, p_title)) = parent_info.get(pid) {
+                    if issue.parent_identifier.as_ref() != Some(p_ident)
+                        || issue.parent_title.as_ref() != Some(p_title)
+                    {
+                        issue.parent_identifier = Some(p_ident.clone());
+                        issue.parent_title = Some(p_title.clone());
+                        changed = true;
+                    }
+                }
+            }
+
+            if let Some(live_children) = children_by_parent.get(&issue.id) {
+                let mut merged = issue.sub_issues.clone();
+                for child in live_children {
+                    if let Some(existing) = merged.iter_mut().find(|s| s.id == child.id) {
+                        *existing = child.clone();
+                    } else {
+                        merged.push(child.clone());
+                    }
+                }
+                merged.sort_by(|a, b| {
+                    a.state_category
+                        .cmp(&b.state_category)
+                        .then_with(|| a.priority.cmp(&b.priority))
+                        .then_with(|| a.identifier.cmp(&b.identifier))
+                });
+                if merged != issue.sub_issues {
+                    issue.sub_issues = merged;
+                    changed = true;
+                }
+            }
+
+            if changed {
+                sql.push_str(&upsert_issue_sql(issue));
+            }
+        }
+    }
+
     fn recompute_all_mention_flags(&mut self) {
         let viewer_name = self.viewer.as_ref().map(|v| v.name.clone());
         let viewer_display = self.viewer.as_ref().map(|v| v.display_name.clone());
@@ -1603,13 +1716,16 @@ fn load_or_create_quack_token() -> CompactString {
 }
 
 fn query_payloads<T: DeserializeOwned>(duckdb_bin: &Path, db_path: &Path, sql: &str) -> Vec<T> {
+    let full_sql = format!("{DUCKDB_LOW_MEMORY_SQL}\n{sql}");
     let output = match Command::new(duckdb_bin)
+        .env("MALLOC_ARENA_MAX", "1")
         .arg("-dark-mode")
+        .arg("-readonly")
         .arg("-batch")
         .arg("-json")
         .arg(db_path)
         .arg("-c")
-        .arg(sql)
+        .arg(full_sql)
         .output()
     {
         Ok(o) if o.status.success() => o,

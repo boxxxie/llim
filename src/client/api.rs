@@ -128,17 +128,37 @@ impl LinearApi {
         let headers = resp.headers().clone();
         let rate_limit = parse_rate_limit_headers(&headers);
         let server_time = parse_server_date_header(&headers).unwrap_or_else(Utc::now);
+        let op_name = extract_graphql_operation_name(query);
 
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            tracing::error!(operation = op_name, status = %status, "Linear API authentication failed");
             return Err(ClientError::Authentication);
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
             let reset_at = rate_limit.as_ref().and_then(|r| r.reset_epoch_secs);
+            tracing::warn!(operation = op_name, ?reset_at, "Linear API rate limited (HTTP 429)");
             return Err(ClientError::RateLimited { reset_at });
         }
 
         let body_text = resp.text().await?;
-        let parsed: GraphQlResponse<T> = serde_json::from_str(&body_text)?;
+        let parsed: GraphQlResponse<T> = match serde_json::from_str(&body_text) {
+            Ok(val) => val,
+            Err(err) => {
+                let snippet = extract_json_error_snippet(&body_text, err.line(), err.column());
+                tracing::error!(
+                    operation = op_name,
+                    error = %err,
+                    line = err.line(),
+                    column = err.column(),
+                    snippet = %snippet,
+                    "Failed to parse Linear GraphQL response"
+                );
+                crate::logging::record_parse_error_dump(op_name, &err, &snippet, &body_text);
+                return Err(ClientError::JsonParse(
+                    format!("{op_name}: {err}").into(),
+                ));
+            }
+        };
 
         if !parsed.errors.is_empty() {
             let combined = parsed
@@ -149,23 +169,28 @@ impl LinearApi {
                 .join("; ");
             let lower = combined.to_lowercase();
             if lower.contains("authentication") || lower.contains("unauthorized") {
+                tracing::error!(operation = op_name, errors = %combined, "Linear GraphQL auth error");
                 return Err(ClientError::Authentication);
             }
             if lower.contains("ratelimit") || lower.contains("rate limit") {
+                tracing::warn!(operation = op_name, errors = %combined, "Linear GraphQL rate limit error");
                 return Err(ClientError::RateLimited {
                     reset_at: rate_limit.as_ref().and_then(|r| r.reset_epoch_secs),
                 });
             }
             if lower.contains("complexity") {
+                tracing::error!(operation = op_name, errors = %combined, "Linear GraphQL complexity exceeded");
                 return Err(ClientError::ComplexityExceeded(combined.into()));
             }
             if parsed.data.is_none() {
+                tracing::error!(operation = op_name, errors = %combined, "Linear GraphQL returned errors with no data");
                 return Err(ClientError::GraphQlPartialError(combined.into()));
             }
-            tracing::warn!("Linear GraphQL returned partial errors: {}", combined);
+            tracing::warn!(operation = op_name, "Linear GraphQL returned partial errors: {}", combined);
         }
 
         let Some(data) = parsed.data else {
+            tracing::error!(operation = op_name, "Linear GraphQL response contained neither data nor errors");
             return Err(ClientError::GraphQlPartialError(
                 "Linear GraphQL response contained neither data nor errors".into(),
             ));
@@ -635,4 +660,39 @@ fn parse_server_date_header(headers: &HeaderMap) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc2822(raw)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn extract_graphql_operation_name(query: &str) -> &str {
+    for line in query.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed
+            .strip_prefix("query ")
+            .or_else(|| trimmed.strip_prefix("mutation "))
+        {
+            let name = rest
+                .split(['(', '{', ' '])
+                .next()
+                .unwrap_or("GraphQL")
+                .trim();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    "GraphQL"
+}
+
+fn extract_json_error_snippet(body: &str, line: usize, column: usize) -> String {
+    let target_line = body
+        .lines()
+        .nth(line.saturating_sub(1))
+        .unwrap_or_else(|| body.lines().next().unwrap_or(""));
+    let char_idx = column.saturating_sub(1);
+    let chars: Vec<char> = target_line.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    let start = char_idx.saturating_sub(120).min(chars.len());
+    let end = (char_idx + 120).min(chars.len());
+    chars[start..end].iter().collect()
 }

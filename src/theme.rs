@@ -12,6 +12,11 @@ pub struct Theme {
     pub project_description: Style,
     pub issue_id: Style,
     pub issue_title: Style,
+    pub epic_id: Style,
+    pub epic_badge: Style,
+    pub epic_pill: Style,
+    pub epic_title: Style,
+    pub sub_issue_badge: Style,
     pub assignee: Style,
     pub label_badge: Style,
     pub date: Style,
@@ -68,6 +73,22 @@ impl Theme {
                 .fg(Gruvbox::YellowBright.into())
                 .add_modifier(Modifier::BOLD),
             issue_title: Style::default().fg(Gruvbox::Light1.into()),
+            epic_id: Style::default()
+                .fg(Gruvbox::PurpleBright.into())
+                .add_modifier(Modifier::BOLD),
+            epic_badge: Style::default()
+                .fg(Gruvbox::PurpleBright.into())
+                .add_modifier(Modifier::BOLD),
+            epic_pill: Style::default()
+                .fg(Gruvbox::Dark0Hard.into())
+                .bg(Gruvbox::PurpleBright.into())
+                .add_modifier(Modifier::BOLD),
+            epic_title: Style::default()
+                .fg(Gruvbox::Light0Hard.into())
+                .add_modifier(Modifier::BOLD),
+            sub_issue_badge: Style::default()
+                .fg(Gruvbox::AquaBright.into())
+                .add_modifier(Modifier::BOLD),
             assignee: Style::default().fg(Gruvbox::BlueBright.into()),
             label_badge: Style::default()
                 .fg(Gruvbox::PurpleBright.into())

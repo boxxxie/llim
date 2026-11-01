@@ -55,6 +55,11 @@ fn sample_issue(
         labels: vec!["backend".into()],
         label_ids: vec![crate::id::LabelId::new("lbl-backend")],
         blocked_by: Vec::new(),
+        parent_id: None,
+        parent_identifier: None,
+        parent_title: None,
+        sub_issues: Vec::new(),
+        related_issues: Vec::new(),
         has_unacknowledged_mention: false,
         git_branch_name: Some(format!("feat/{}", identifier.to_ascii_lowercase()).into()),
         url: format!("https://linear.app/acme/issue/{identifier}").into(),
@@ -1146,6 +1151,277 @@ fn test_emacs_keybindings_esc_chords_and_comment_draft_lifecycle() {
         LlimEvent::SubmitMutation(m) if matches!(**m, LinearMutation::CreateComment { ref body, .. } if body == "ship it")
     )));
 }
+
+#[test]
+fn test_dedicated_issue_page_navigation_and_two_column_render() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use crate::ui::stateful_widgets::StatefulWidgets;
+
+    let dir = tempdir().unwrap();
+    let mut store = LinearStore::new(dir.path().join("issue_page_test.duckdb"));
+
+    let mut iss1 = sample_issue(
+        "iss-page-1",
+        "ACM-10",
+        IssuePriority::High,
+        StateCategory::Started,
+        Some("viewer-1"),
+        1_700_000_500,
+    );
+    iss1.description = Some("# Architecture Plan\n\n- [x] Build parser\n- [ ] Ship page".to_string());
+    let iss2 = sample_issue(
+        "iss-page-2",
+        "ACM-11",
+        IssuePriority::Medium,
+        StateCategory::Unstarted,
+        None,
+        1_700_000_200,
+    );
+    store.issues.insert(iss1.id.clone(), iss1.clone());
+    store.issues.insert(iss2.id.clone(), iss2.clone());
+
+    let cfg = LlimConfig::default();
+    let mut ui = StatefulWidgets::new(&cfg);
+    ui.recompute_projections(&store);
+
+    // 1. Pressing Enter in Normal Mode dispatches OpenSelectedDetails -> opens dedicated Issue Page
+    let mut events = Vec::new();
+    ui.dispatch_input(
+        &LlimEvent::InputKey(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &mut events,
+    );
+    assert!(matches!(events.as_slice(), [LlimEvent::OpenSelectedDetails]));
+    events.clear();
+
+    ui.push_issue_details(&iss1.id, &store);
+    assert_eq!(ui.open_issue_details_id(), Some(iss1.id.clone()));
+
+    // 2. Render the 2-column Issue Page into a 120x36 buffer and verify both columns render
+    let area = Rect::new(0, 0, 120, 36);
+    let mut buf = Buffer::empty(area);
+    ui.open_issue_page().unwrap().borrow().render_in(area, &mut buf);
+    let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(rendered.contains("ACM-10"));
+    assert!(rendered.contains("# Architecture Plan"));
+    assert!(rendered.contains("[✓] Build parser"));
+    assert!(rendered.contains("Properties & Actions"));
+    assert!(rendered.contains("Quick Actions"));
+
+    // 3. Pressing 'J' steps to next issue in the list and updates the open Issue Page in place
+    ui.dispatch_input(
+        &LlimEvent::InputKey(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT)),
+        &mut events,
+    );
+    assert!(matches!(events.as_slice(), [LlimEvent::IssueDetailsNext]));
+    events.clear();
+
+    ui.advance_list_cursor(true);
+    let next_id = ui.selected_list_issue(&store).unwrap().id.clone();
+    assert_eq!(next_id, iss2.id);
+    ui.push_issue_details(&next_id, &store);
+    assert_eq!(ui.modal_stack.len(), 1);
+    assert_eq!(ui.open_issue_details_id(), Some(iss2.id.clone()));
+
+    // 4. Pressing Backspace or Esc closes the dedicated Issue Page
+    ui.dispatch_input(
+        &LlimEvent::InputKey(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+        &mut events,
+    );
+    assert!(matches!(events.as_slice(), [LlimEvent::IssueDetailsClose]));
+    assert!(ui.pop_modal());
+    assert!(ui.open_issue_page().is_none());
+}
+
+#[test]
+fn test_epic_detection_umbrella_and_parent_hierarchy_rendering() {
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use crate::{
+        domain::{IssueSortOrder, RelatedIssueSummary, SubIssueSummary},
+        ui::stateful_widgets::StatefulWidgets,
+    };
+
+    let dir = tempdir().unwrap();
+    let mut store = LinearStore::new(dir.path().join("epic_render_test.duckdb"));
+
+    // 1. Umbrella [Epic] issue with prerequisite checklist (like NVE-33)
+    let mut umbrella_epic = sample_issue(
+        "iss-nve-33",
+        "NVE-33",
+        IssuePriority::High,
+        StateCategory::Backlog,
+        Some("viewer-1"),
+        1_700_001_000,
+    );
+    umbrella_epic.title =
+        "[Epic] Fundraise Data Room & Interactive Due Diligence Share".into();
+    umbrella_epic.description = Some(
+        "## Overview\n\n### Prerequisites before splitting into Todo tickets\n- [ ] Finalize data room folder taxonomy\n- [x] Confirm watermark & download policy\n"
+            .to_string(),
+    );
+    umbrella_epic.related_issues.push(RelatedIssueSummary {
+        id: IssueId::new("iss-nve-57"),
+        identifier: "NVE-57".into(),
+        title: "[Epic] End-to-End LP Onboarding".into(),
+        relation_type: "related".into(),
+        state_name: "Backlog".into(),
+        state_color: "#bec2c8".into(),
+        state_category: StateCategory::Backlog,
+    });
+
+    assert!(umbrella_epic.is_epic());
+    assert_eq!(
+        umbrella_epic.clean_title(),
+        "Fundraise Data Room & Interactive Due Diligence Share"
+    );
+    assert_eq!(
+        umbrella_epic.epic_badge_label().as_deref(),
+        Some("◆ EPIC 1/2")
+    );
+
+    // 2. Parent Epic with sub-issues (like CAA-335)
+    let mut parent_epic = sample_issue(
+        "iss-caa-335",
+        "CAA-335",
+        IssuePriority::Urgent,
+        StateCategory::Started,
+        Some("viewer-1"),
+        1_700_002_000,
+    );
+    parent_epic.title = "LP Portal Experience Overhaul".into();
+    parent_epic.sub_issues = vec![
+        SubIssueSummary {
+            id: IssueId::new("iss-caa-336"),
+            identifier: "CAA-336".into(),
+            title: "Build LP dashboard header".into(),
+            state_name: "Done".into(),
+            state_color: "#5e6ad2".into(),
+            state_category: StateCategory::Completed,
+            priority: IssuePriority::High,
+            assignee_name: Some("Alice".into()),
+        },
+        SubIssueSummary {
+            id: IssueId::new("iss-caa-337"),
+            identifier: "CAA-337".into(),
+            title: "Wire capital call table".into(),
+            state_name: "In Progress".into(),
+            state_color: "#f2c94c".into(),
+            state_category: StateCategory::Started,
+            priority: IssuePriority::High,
+            assignee_name: Some("Bob".into()),
+        },
+    ];
+
+    let mut sub_issue = sample_issue(
+        "iss-caa-337",
+        "CAA-337",
+        IssuePriority::High,
+        StateCategory::Started,
+        Some("viewer-1"),
+        1_700_001_500,
+    );
+    sub_issue.title = "Wire capital call table".into();
+    sub_issue.parent_id = Some(IssueId::new("iss-caa-335"));
+    sub_issue.parent_identifier = Some("CAA-335".into());
+    sub_issue.parent_title = Some("LP Portal Experience Overhaul".into());
+
+    assert!(parent_epic.is_epic());
+    assert_eq!(
+        parent_epic.epic_badge_label().as_deref(),
+        Some("◆ EPIC 1/2")
+    );
+    assert!(sub_issue.is_sub_issue());
+
+    store.issues.insert(umbrella_epic.id.clone(), umbrella_epic.clone());
+    store.issues.insert(parent_epic.id.clone(), parent_epic.clone());
+    store.issues.insert(sub_issue.id.clone(), sub_issue.clone());
+
+    let cfg = LlimConfig::default();
+    let mut ui = StatefulWidgets::new(&cfg);
+    ui.issues_view.sort_order = IssueSortOrder::EpicsFirst;
+    ui.recompute_projections(&store);
+
+    // EpicsFirst places CAA-335 followed immediately by its child CAA-337, then NVE-33
+    let ordered_ids: Vec<&str> = ui
+        .issues_view
+        .rows
+        .iter()
+        .map(|i| i.identifier.as_str())
+        .collect();
+    assert_eq!(ordered_ids, vec!["CAA-335", "CAA-337", "NVE-33"]);
+
+    // Render IssueDetailsPopup for NVE-33 and verify Umbrella Epic Breakdown & Related Issues appear
+    ui.push_issue_details(&umbrella_epic.id, &store);
+    let area = Rect::new(0, 0, 120, 40);
+    let mut buf = Buffer::empty(area);
+    ui.open_issue_page().unwrap().borrow().render_in(area, &mut buf);
+    let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
+    assert!(rendered.contains("Umbrella Epic Breakdown"));
+    assert!(rendered.contains("1/2 prerequisites completed"));
+    assert!(rendered.contains("Finalize data room folder taxonomy"));
+    assert!(rendered.contains("Related Issues (1)"));
+    assert!(rendered.contains("NVE-57"));
+
+    // Verify GraphQL BootstrapData deserializes sub-issues with assigned users cleanly
+    let raw_bootstrap = json!({
+        "data": {
+            "projects": { "nodes": [] },
+            "issues": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [{
+                    "id": "iss-caa-335",
+                    "identifier": "CAA-335",
+                    "title": "Parent Epic",
+                    "description": null,
+                    "url": "https://linear.app/acme/issue/CAA-335",
+                    "branchName": null,
+                    "priority": 1,
+                    "createdAt": "2026-10-29T00:00:00Z",
+                    "updatedAt": "2026-10-29T00:00:00Z",
+                    "completedAt": null,
+                    "canceledAt": null,
+                    "archivedAt": null,
+                    "team": { "id": "team-1", "key": "CAA", "name": "caasa" },
+                    "project": null,
+                    "state": { "id": "st-1", "name": "In Progress", "type": "started", "color": "#f2c94c" },
+                    "assignee": { "id": "u-1", "name": "Alice", "displayName": "Alice" },
+                    "creator": null,
+                    "parent": null,
+                    "children": {
+                        "nodes": [{
+                            "id": "iss-caa-336",
+                            "identifier": "CAA-336",
+                            "title": "Assigned child sub-issue",
+                            "priority": 2,
+                            "state": { "name": "Done", "type": "completed", "color": "#5e6ad2" },
+                            "assignee": { "name": "Bob", "displayName": "Bob" }
+                        }]
+                    },
+                    "labels": { "nodes": [] },
+                    "relations": { "nodes": [] },
+                    "inverseRelations": { "nodes": [] }
+                }]
+            }
+        }
+    });
+    let parsed: crate::client::graphql::GraphQlResponse<crate::client::graphql::BootstrapData> =
+        serde_json::from_value(raw_bootstrap).expect("sub-issue with assignee should deserialize");
+    let domain_issue = parsed
+        .data
+        .unwrap()
+        .issues
+        .nodes
+        .into_iter()
+        .next()
+        .unwrap()
+        .into_domain();
+    assert_eq!(domain_issue.sub_issues.len(), 1);
+    assert_eq!(
+        domain_issue.sub_issues[0].assignee_name.as_deref(),
+        Some("Bob")
+    );
+}
+
 
 
 

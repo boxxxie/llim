@@ -39,6 +39,8 @@ impl NoticeService {
     pub fn apply(&mut self, event: &LlimEvent) {
         match event {
             LlimEvent::AppError(err) => {
+                tracing::error!(error = %err, "Application error notice");
+                crate::logging::append_error_log("APP_ERROR", &err.to_string());
                 let msg = match err {
                     LlimError::InvalidLinearToken => NoticeMessage::InvalidLinearToken,
                     LlimError::ConfigFileNotFound { path } => NoticeMessage::ConfigError(

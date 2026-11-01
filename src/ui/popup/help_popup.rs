@@ -63,7 +63,9 @@ impl HelpPopup {
         let rows: Vec<(&str, &str)> = vec![
             ("1 / 2 / 3", "Switch between 1: Issues, 2: My Attention, and 3: Activity Feed"),
             ("[ / ]", "Cycle backward / forward across the 3 views"),
-            ("Tab / Enter", "Toggle focus between the Top Table (50%) and Bottom Details Inspector (50%)"),
+            ("Enter", "Open dedicated full-page Issue view (Esc / Backspace to return to list)"),
+            ("J / K (on Issue page)", "Step to next / previous issue in list while inside the dedicated Issue page"),
+            ("Tab", "Toggle focus between the Top Table (50%) and Bottom Details Inspector (50%)"),
             ("← / → / J / K", "Scroll Bottom Inspector up (← / K) or down (→ / J) without leaving the table"),
             ("Shift+← / Shift+→", "Page-scroll Bottom Inspector up / down 10 lines without leaving the table"),
             ("Space / v / V", "Select/deselect issue (Space), select+advance (v), or toggle all visible (V)"),

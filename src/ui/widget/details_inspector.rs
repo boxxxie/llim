@@ -11,7 +11,11 @@ use crate::{
     gruvbox::Gruvbox,
     id::{ActivityId, IssueId},
     theme::theme,
-    ui::format_relative_time,
+    ui::{
+        format_relative_time,
+        markdown::{render_markdown, render_markdown_indented, render_markdown_with_options},
+        render_epic_and_relations_section,
+    },
 };
 
 #[derive(Debug, Default, Clone)]
@@ -101,14 +105,31 @@ impl StatefulWidget for DetailsInspectorWidget {
         };
 
         let title = match (&state.issue, &state.selected_activity) {
-            (Some(issue), _) => Line::from(vec![
-                Span::styled(format!(" {} ", issue.identifier), theme().border.title),
-                Span::styled(format!(" {} ", issue.title), theme().border_title),
-                Span::styled(
+            (Some(issue), _) => {
+                let mut spans = Vec::with_capacity(5);
+                if issue.is_epic() {
+                    spans.push(Span::styled(" ◆ EPIC ", theme().epic_pill));
+                }
+                spans.push(Span::styled(
+                    format!(" {} ", issue.identifier),
+                    theme().border.title,
+                ));
+                if let Some(ref parent_ident) = issue.parent_identifier {
+                    spans.push(Span::styled(
+                        format!(" ↳ {parent_ident} "),
+                        theme().sub_issue_badge,
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!(" {} ", issue.clean_title()),
+                    theme().border_title,
+                ));
+                spans.push(Span::styled(
                     "(←/→ or J/K to scroll, c to comment, a to hide) ",
                     theme().date,
-                ),
-            ]),
+                ));
+                Line::from(spans)
+            }
             (None, Some(act)) => Line::from(vec![
                 Span::styled(
                     format!(" {} ", act.issue_identifier),
@@ -276,26 +297,18 @@ impl StatefulWidget for DetailsInspectorWidget {
             ]));
             if let Some(ref act_body) = act.body {
                 if !act_body.trim().is_empty() && Some(act_body.as_str()) != issue.description.as_deref() {
-                    for l in act_body.lines() {
-                        body_lines.push(Line::from(Span::styled(
-                            format!("  {l}"),
-                            theme().issue_title,
-                        )));
-                    }
+                    body_lines.extend(render_markdown_indented(act_body, "  "));
                 }
             }
             body_lines.push(Line::from(""));
         }
 
+        body_lines.extend(render_epic_and_relations_section(issue, ""));
+
         body_lines.push(Line::from(Span::styled("Description", heading_style)));
         match issue.description.as_deref() {
             Some(desc) if !desc.trim().is_empty() => {
-                for l in desc.lines() {
-                    body_lines.push(Line::from(Span::styled(
-                        l.to_string(),
-                        theme().issue_title,
-                    )));
-                }
+                body_lines.extend(render_markdown(desc));
             }
             _ => {
                 body_lines.push(Line::from(Span::styled(
@@ -326,12 +339,11 @@ impl StatefulWidget for DetailsInspectorWidget {
                     theme().input_description,
                 ),
             ]));
-            for line in draft.lines() {
-                body_lines.push(Line::from(Span::styled(
-                    format!("  {line}"),
-                    theme().project_description,
-                )));
-            }
+            body_lines.extend(render_markdown_with_options(
+                draft,
+                "  ",
+                theme().project_description,
+            ));
             body_lines.push(Line::from(""));
         }
 
@@ -354,12 +366,7 @@ impl StatefulWidget for DetailsInspectorWidget {
                         theme().date,
                     ),
                 ]));
-                for line in comment.body.lines() {
-                    body_lines.push(Line::from(Span::styled(
-                        format!("  {line}"),
-                        theme().issue_title,
-                    )));
-                }
+                body_lines.extend(render_markdown_indented(&comment.body, "  "));
                 body_lines.push(Line::from(""));
             }
         }

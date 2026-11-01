@@ -10,7 +10,10 @@ use crate::{
     domain::ActivityEvent,
     gruvbox::Gruvbox,
     theme::theme,
-    ui::{format_relative_time, fx::window::Window, popup::utility::CenteredShrink},
+    ui::{
+        format_relative_time, fx::window::Window, markdown::render_markdown,
+        popup::utility::CenteredShrink,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -107,9 +110,11 @@ impl ActivityDetailsPopup {
         ];
 
         if let Some(ref body) = self.activity.body {
-            for l in body.lines() {
+            if !body.trim().is_empty() {
+                lines.extend(render_markdown(body));
+            } else {
                 lines.push(Line::from(Span::styled(
-                    l.to_string(),
+                    self.activity.summary.to_string(),
                     theme().issue_title,
                 )));
             }

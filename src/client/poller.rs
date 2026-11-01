@@ -118,6 +118,8 @@ pub fn spawn_linear_poller(
                         PollerCommand::ExecuteMutation(mutation) => {
                             let mut svc = service.lock().await;
                             if let Err(err) = svc.execute_mutation(*mutation, &sender).await {
+                                tracing::error!(error = %err, "Linear mutation failed");
+                                crate::logging::append_error_log("MUTATION_ERROR", &err.to_string());
                                 sender.dispatch(LlimEvent::MutationFailed(err.to_string().into()));
                             }
                         }
@@ -203,9 +205,13 @@ fn handle_client_error(err: ClientError, sender: &Sender<LlimEvent>) {
     match err {
         ClientError::OfflineMode => {}
         ClientError::Authentication => {
+            tracing::error!("Linear sync failed: invalid or missing API token");
+            crate::logging::append_error_log("AUTH_ERROR", "Invalid or missing Linear API token");
             sender.dispatch(LlimEvent::AppError(LlimError::InvalidLinearToken));
         }
         other => {
+            tracing::error!(error = %other, "Linear sync failed");
+            crate::logging::append_error_log("SYNC_ERROR", &other.to_string());
             sender.dispatch(LlimEvent::SyncError(other.to_string().into()));
         }
     }
